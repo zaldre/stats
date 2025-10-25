@@ -14,36 +14,48 @@ import (
 	"time"
 )
 
+// Global variables
+var (
+	mediaDirs  = []string{"/mnt/core/pub/cloud/tv", "/mnt/core/pub/cloud/movies"}
+	sabAPIKey  string
+	sabHost    string
+	uptime     string
+	logLevel   string
+	statsFile  string
+	webTimeout int
+	sabPort    int
+)
+
 // getEnv retrieves an environment variable or returns a default value
-func getEnv(key, defaultVal string) string {
-	if value := os.Getenv(key); value != "" {
+// func getEnv(key string, defaultVal T) T {
+// getEnv retrieves an environment variable or returns a default value
+func getEnv(key string, defaultVal string) string {
+	var value string
+	if value = os.Getenv(key); value != "" {
 		return value
 	}
 	return defaultVal
 }
 
-// getEnvInt retrieves an integer environment variable or returns a default value
-func getEnvInt(key string, defaultVal int) int {
-	if value := os.Getenv(key); value != "" {
-		if intVal, err := strconv.Atoi(value); err == nil {
-			return intVal
-		}
+func init() {
+	// Initialize string variables
+	sabAPIKey = getEnv("SABAPIKEY", "YOURKEY")
+	sabHost = getEnv("SABHOST", "https://sab.zaldre.com")
+	uptime = getEnv("UPTIME", "https://app.statuscake.com/button/index.php?Track=lmmBTReo4c&Days=30&Design=2")
+	logLevel = getEnv("LOGLEVEL", "Normal")
+	statsFile = getEnv("STATSFILE", "/container/data/stats/index.html")
+
+	// Initialize int variables
+	webTimeout, _ = strconv.Atoi(getEnv("WEBTIMEOUT", "15"))
+	if webTimeout == 0 {
+		webTimeout = 15
 	}
-	return defaultVal
+
+	sabPort, _ = strconv.Atoi(getEnv("SABPORT", "443"))
+	if sabPort == 0 {
+		sabPort = 443
+	}
 }
-
-// Load startup vars
-var (
-	mediaDirs = []string{"/mnt/core/pub/cloud/tv", "/mnt/core/pub/cloud/movies"}
-)
-
-var sabAPIKey string = getEnv("SABAPIKEY", "YOURKEY")
-var sabHost string = getEnv("SABHOST", "https://sab.zaldre.com")
-var uptime string = getEnv("UPTIME", "https://app.statuscake.com/button/index.php?Track=lmmBTReo4c&Days=30&Design=2")
-var logLevel string = getEnv("LOGLEVEL", "Normal") // None, Normal, Debug
-var webTimeout int = getEnvInt("WEBTIMEOUT", 15)   // seconds)
-var sabPort int = getEnvInt("SABPORT", 443)
-var statsFile string = getEnv("STATSFILE", "/container/data/stats/index.html")
 
 // SABQueue represents the SabNZBD queue response
 type SABQueue struct {
@@ -53,6 +65,7 @@ type SABQueue struct {
 }
 
 func outLog(text string, obj interface{}) {
+
 	if logLevel == "None" {
 		return
 	}
@@ -66,20 +79,31 @@ func outLog(text string, obj interface{}) {
 	}
 }
 
-func calcSize(byteCount int64) string {
+func calcSize(byteCount int64) (string, error) {
+	if byteCount < 0 {
+		return "", fmt.Errorf("byte count cannot be negative: %d", byteCount)
+	}
+
 	if byteCount == 0 {
-		return "0 Bytes"
+		return "0 Bytes", nil
 	}
 
 	sizeUnits := []string{"Bytes", "KB", "MB", "GB", "TB"}
 	unitIndex := int(math.Floor(math.Log(float64(byteCount)) / math.Log(1024)))
 
+	// Handle edge case where unitIndex exceeds available units
+	if unitIndex >= len(sizeUnits) {
+		// Either cap it or return an error
+		unitIndex = len(sizeUnits) - 1
+		// Or: return "", fmt.Errorf("byte count too large: %d", byteCount)
+	}
+
 	if unitIndex == 0 {
-		return fmt.Sprintf("%d Bytes", byteCount)
+		return fmt.Sprintf("%d Bytes", byteCount), nil
 	}
 
 	size := float64(byteCount) / math.Pow(1024, float64(unitIndex))
-	return fmt.Sprintf("%.2f %s", size, sizeUnits[unitIndex])
+	return fmt.Sprintf("%.2f %s", size, sizeUnits[unitIndex]), nil
 }
 
 func getSABQueueSize() (int64, error) {
@@ -145,16 +169,16 @@ func getMediaSize() (int64, error) {
 	return totalSize, nil
 }
 
-func getMaintenanceNotice() string {
+func getMaintenanceNotice() (string, error) {
 	scriptDir, err := filepath.Abs(filepath.Dir(os.Args[0]))
 	if err != nil {
-		return ""
+		return "", err
 	}
 
 	maintenanceFile := filepath.Join(scriptDir, "maintenance.txt")
 	content, err := os.ReadFile(maintenanceFile)
 	if err != nil {
-		return ""
+		return "", err
 	}
 
 	outLog("Maintenance notice found, Appending this to HTML output", nil)
@@ -163,12 +187,11 @@ func getMaintenanceNotice() string {
 		outLog(notice, nil)
 	}
 	fmt.Println(notice)
-	return notice
+	return notice, nil
 }
 
 func generateHTML(mediaSize, downloadSize string, maintenance string) string {
 	plex := "https://app.plex.tv"
-
 	return fmt.Sprintf(`<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -268,6 +291,7 @@ func generateHTML(mediaSize, downloadSize string, maintenance string) string {
     </div>
 </body>
 </html>`, plex, uptime, mediaSize, downloadSize, maintenance)
+
 }
 
 func main() {
@@ -279,7 +303,10 @@ func main() {
 	}
 
 	outLog("Finalising processing for download queue size", nil)
-	downloadSizeStr := calcSize(downloadSizeBytes)
+	downloadSizeStr, err := calcSize(downloadSizeBytes)
+	if err != nil {
+		log.Fatalf("Unable to calculate download size: %v", err)
+	}
 
 	outLog("Getting media directory stats", nil)
 	totalMediaSize, err := getMediaSize()
@@ -287,14 +314,17 @@ func main() {
 		log.Fatalf("Error getting media size: %v", err)
 	}
 
-	mediaSizeStr := calcSize(totalMediaSize)
+	mediaSizeStr, err := calcSize(totalMediaSize)
+	if err != nil {
+		log.Fatalf("Error: Unable to calculate size of media size dir: %v", err)
+	}
 
 	if logLevel == "Debug" {
 		outLog(fmt.Sprintf("MediaSize: %s", mediaSizeStr), nil)
 		outLog(fmt.Sprintf("DownloadSize: %s", downloadSizeStr), nil)
 	}
 
-	maintenance := getMaintenanceNotice()
+	maintenance, err := getMaintenanceNotice()
 
 	outLog("Creating HTML", nil)
 	html := generateHTML(mediaSizeStr, downloadSizeStr, maintenance)
