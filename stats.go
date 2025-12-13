@@ -25,7 +25,7 @@ var (
 	sabPort    int
 )
 
-const VERSION = "0.0.1"
+const VERSION = "0.0.2"
 
 // getEnv retrieves an environment variable or returns a default value
 // func getEnv(key string, defaultVal T) T {
@@ -295,7 +295,20 @@ func generateHTML(mediaSize, downloadSize string, maintenance string) string {
 
 }
 
-func main() {
+func writeHTML(html string) {
+
+	if logLevel == "debug" {
+		outLog(html, nil)
+	}
+
+	if err := os.WriteFile(statsFile, []byte(html), 0644); err != nil {
+		log.Fatalf("Error writing HTML file: %v", err)
+	}
+
+	outLog("HTML file created successfully", nil)
+
+}
+func logic() {
 	outLog("Querying SabNZBD for queue size and remaining MB", nil)
 
 	downloadSizeBytes, err := getSABQueueSize()
@@ -329,14 +342,9 @@ func main() {
 
 	outLog("Creating HTML", nil)
 	html := generateHTML(mediaSizeStr, downloadSizeStr, maintenance)
+	writeHTML(html)
+}
+func main() {
 
-	if logLevel == "debug" {
-		outLog(html, nil)
-	}
-
-	if err := os.WriteFile(statsFile, []byte(html), 0644); err != nil {
-		log.Fatalf("Error writing HTML file: %v", err)
-	}
-
-	outLog("HTML file created successfully", nil)
+	logic()
 }
