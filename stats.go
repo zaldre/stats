@@ -7,7 +7,6 @@ import (
 	"math"
 	"net/http"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -135,28 +134,34 @@ func getSABQueueSize() (int64, error) {
 	return sizeBytes, nil
 }
 
+func getDirSize(dirPath string) (int64, error) {
+	var size int64
+	err := filepath.WalkDir(dirPath, func(path string, d os.DirEntry, err error) error {
+		if err != nil {
+			// Continue on errors for individual files/directories
+			return nil
+		}
+		if !d.IsDir() {
+			info, err := d.Info()
+			if err != nil {
+				return nil
+			}
+			size += info.Size()
+		}
+		return nil
+	})
+	return size, err
+}
+
 func getMediaSize() (int64, error) {
 	var totalSize int64
 
 	for _, mediaDir := range mediaDirs {
-		cmd := exec.Command("du", "-sb", mediaDir)
-		output, err := cmd.Output()
+		size, err := getDirSize(mediaDir)
 		if err != nil {
 			outLog(fmt.Sprintf("Error getting size for %s: %v", mediaDir, err), nil)
 			continue
 		}
-
-		parts := strings.Split(string(output), "\t")
-		if len(parts) < 1 {
-			continue
-		}
-
-		size, err := strconv.ParseInt(strings.TrimSpace(parts[0]), 10, 64)
-		if err != nil {
-			outLog(fmt.Sprintf("Error parsing size for %s: %v", mediaDir, err), nil)
-			continue
-		}
-
 		totalSize += size
 	}
 
