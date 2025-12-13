@@ -47,14 +47,8 @@ func init() {
 
 	// Initialize int variables
 	webTimeout, _ = strconv.Atoi(getEnv("WEBTIMEOUT", "15"))
-	if webTimeout == 0 {
-		webTimeout = 15
-	}
-
 	sabPort, _ = strconv.Atoi(getEnv("SABPORT", "443"))
-	if sabPort == 0 {
-		sabPort = 443
-	}
+
 }
 
 // SABQueue represents the SabNZBD queue response
@@ -88,7 +82,7 @@ func calcSize(byteCount int64) (string, error) {
 		return "0 Bytes", nil
 	}
 
-	sizeUnits := []string{"Bytes", "KB", "MB", "GB", "TB"}
+	sizeUnits := []string{"Bytes", "KB", "MB", "GB", "TB", "PB"}
 	unitIndex := int(math.Floor(math.Log(float64(byteCount)) / math.Log(1024)))
 
 	// Handle edge case where unitIndex exceeds available units
