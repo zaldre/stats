@@ -7,7 +7,6 @@ import (
 	"math"
 	"net/http"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -26,7 +25,7 @@ var (
 	sabPort    int
 )
 
-const VERSION = "0.0.1"
+const VERSION = "0.0.2"
 
 // getEnv retrieves an environment variable or returns a default value
 // func getEnv(key string, defaultVal T) T {
@@ -49,14 +48,8 @@ func init() {
 
 	// Initialize int variables
 	webTimeout, _ = strconv.Atoi(getEnv("WEBTIMEOUT", "15"))
-	if webTimeout == 0 {
-		webTimeout = 15
-	}
-
 	sabPort, _ = strconv.Atoi(getEnv("SABPORT", "443"))
-	if sabPort == 0 {
-		sabPort = 443
-	}
+
 }
 
 // SABQueue represents the SabNZBD queue response
@@ -90,7 +83,7 @@ func calcSize(byteCount int64) (string, error) {
 		return "0 Bytes", nil
 	}
 
-	sizeUnits := []string{"Bytes", "KB", "MB", "GB", "TB"}
+	sizeUnits := []string{"Bytes", "KB", "MB", "GB", "TB", "PB"}
 	unitIndex := int(math.Floor(math.Log(float64(byteCount)) / math.Log(1024)))
 
 	// Handle edge case where unitIndex exceeds available units
@@ -143,28 +136,34 @@ func getSABQueueSize() (int64, error) {
 	return sizeBytes, nil
 }
 
+func getDirSize(dirPath string) (int64, error) {
+	var size int64
+	err := filepath.WalkDir(dirPath, func(path string, d os.DirEntry, err error) error {
+		if err != nil {
+			// Continue on errors for individual files/directories
+			return nil
+		}
+		if !d.IsDir() {
+			info, err := d.Info()
+			if err != nil {
+				return nil
+			}
+			size += info.Size()
+		}
+		return nil
+	})
+	return size, err
+}
+
 func getMediaSize() (int64, error) {
 	var totalSize int64
 
 	for _, mediaDir := range mediaDirs {
-		cmd := exec.Command("du", "-sb", mediaDir)
-		output, err := cmd.Output()
+		size, err := getDirSize(mediaDir)
 		if err != nil {
 			outLog(fmt.Sprintf("Error getting size for %s: %v", mediaDir, err), nil)
 			continue
 		}
-
-		parts := strings.Split(string(output), "\t")
-		if len(parts) < 1 {
-			continue
-		}
-
-		size, err := strconv.ParseInt(strings.TrimSpace(parts[0]), 10, 64)
-		if err != nil {
-			outLog(fmt.Sprintf("Error parsing size for %s: %v", mediaDir, err), nil)
-			continue
-		}
-
 		totalSize += size
 	}
 
@@ -296,7 +295,20 @@ func generateHTML(mediaSize, downloadSize string, maintenance string) string {
 
 }
 
-func main() {
+func writeHTML(html string) {
+
+	if logLevel == "debug" {
+		outLog(html, nil)
+	}
+
+	if err := os.WriteFile(statsFile, []byte(html), 0644); err != nil {
+		log.Fatalf("Error writing HTML file: %v", err)
+	}
+
+	outLog("HTML file created successfully", nil)
+
+}
+func logic() {
 	outLog("Querying SabNZBD for queue size and remaining MB", nil)
 
 	downloadSizeBytes, err := getSABQueueSize()
@@ -330,14 +342,9 @@ func main() {
 
 	outLog("Creating HTML", nil)
 	html := generateHTML(mediaSizeStr, downloadSizeStr, maintenance)
+	writeHTML(html)
+}
+func main() {
 
-	if logLevel == "debug" {
-		outLog(html, nil)
-	}
-
-	if err := os.WriteFile(statsFile, []byte(html), 0644); err != nil {
-		log.Fatalf("Error writing HTML file: %v", err)
-	}
-
-	outLog("HTML file created successfully", nil)
+	logic()
 }
