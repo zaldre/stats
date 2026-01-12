@@ -43,7 +43,7 @@ func init() {
 	// Initialize string variables
 	sabAPIKey = getEnv("SABAPIKEY", "YOURKEY")
 	sabHost = getEnv("SABHOST", "https://sab.zaldre.com")
-	uptime = getEnv("UPTIME", "https://app.statuscake.com/button/index.php?Track=lmmBTReo4c&Days=30&Design=2")
+	uptime = getEnv("UPTIME", "https://app.statuscake.com/button/index.php?Track=6422414&Days=30&Design=2")
 	logLevel = getEnv("LOGLEVEL", "Normal")
 	statsFile = getEnv("STATSFILE", "/container/data/stats/index.html")
 
