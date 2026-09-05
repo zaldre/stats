@@ -38,7 +38,7 @@ func TestLoadConfigDefaults(t *testing.T) {
 	assert.Equal(t, "/mnt/core/pub/cloud", config.CloudSource)
 	assert.Equal(t, "pub:cloud", config.CloudDest)
 	assert.Equal(t, 12*time.Hour, config.CloudMaxAge)
-	assert.Equal(t, 300*time.Second, config.CloudTimeout)
+	assert.Equal(t, 600*time.Second, config.CloudTimeout)
 
 	// The three sidecar files default beside the page, not beside the binary.
 	assert.Equal(t, "/container/data/stats/maintenance.txt", config.MaintenanceFile)

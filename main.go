@@ -7,7 +7,7 @@ import (
 )
 
 // VERSION is bumped whenever a change becomes eligible for commit.
-const VERSION = "0.1.0"
+const VERSION = "0.4.0"
 
 func main() {
 	if err := run(); err != nil {

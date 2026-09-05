@@ -38,8 +38,13 @@ type Config struct {
 // Every duration below is configured in whole seconds, matching the WEBTIMEOUT
 // and SABPORT convention this program already exposed to its CronJob.
 const (
-	defaultWebTimeoutSeconds   = 15
-	defaultCloudTimeoutSeconds = 300
+	defaultWebTimeoutSeconds = 15
+	// Dropbox answers a throttle with "trying again in 300 seconds", so a budget
+	// of 300 could never survive one: the backoff alone consumed it and the run
+	// timed out having done nothing. 600 covers one backoff plus the roughly
+	// 100-second listing that follows, and still fits inside the Job's
+	// activeDeadlineSeconds with the media walk alongside it.
+	defaultCloudTimeoutSeconds = 600
 	// A full recursive listing of the remote is expensive, and Dropbox throttles
 	// hard once it has seen a few in quick succession - an unthrottled listing
 	// takes about 100 seconds, a throttled one can exceed ten minutes. Refreshing
