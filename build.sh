@@ -1,6 +1,6 @@
 #!/bin/bash
 set -e
-VERSION=$(grep 'const VERSION' stats.go | sed -E 's/.*"([^"]+)".*/\1/')
+VERSION=$(grep 'const VERSION' main.go | sed -E 's/.*"([^"]+)".*/\1/')
 BIN_NAME="stats"
 
 # Platforms you want to build for
