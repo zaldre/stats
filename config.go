@@ -5,7 +5,6 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
-	"strings"
 	"time"
 )
 
@@ -17,8 +16,6 @@ type Config struct {
 	SABPort    int
 	SABAPIKey  string
 	WebTimeout time.Duration
-
-	MediaDirs []string
 
 	StatsFile       string
 	FaviconFile     string
@@ -42,12 +39,12 @@ const (
 	// Dropbox answers a throttle with "trying again in 300 seconds", so a budget
 	// of 300 could never survive one: the backoff alone consumed it and the run
 	// timed out having done nothing. 600 covers one backoff plus the roughly
-	// 100-second listing that follows, and still fits inside the Job's
-	// activeDeadlineSeconds with the media walk alongside it.
+	// 100-second remote measurement that follows, and still fits inside the Job's
+	// activeDeadlineSeconds.
 	defaultCloudTimeoutSeconds = 600
-	// A full recursive listing of the remote is expensive, and Dropbox throttles
-	// hard once it has seen a few in quick succession - an unthrottled listing
-	// takes about 100 seconds, a throttled one can exceed ten minutes. Refreshing
+	// Sizing the remote walks it in full, and Dropbox throttles hard once it has
+	// seen a few of those in quick succession - an unthrottled pass takes about
+	// 100 seconds, a throttled one can exceed ten minutes. Refreshing
 	// twice a day keeps the figure current enough for an upload measured in weeks
 	// while leaving the sync job's own API budget alone.
 	defaultCloudMaxAgeSeconds = 12 * 60 * 60
@@ -63,13 +60,12 @@ func LoadConfig() (*Config, error) {
 		StatsFile:      envString("STATSFILE", "/container/data/stats/index.html"),
 		UptimeImageURL: envString("UPTIME", "https://app.statuscake.com/button/index.php?Track=6422414&Days=30&Design=2"),
 		PlexURL:        envString("PLEXURL", "https://app.plex.tv"),
-		CloudSource:    envString("CLOUDSRC", "/mnt/core/pub/cloud"),
-		CloudDest:      envString("CLOUDDST", "pub:cloud"),
-		LogLevel:       ParseLogLevel(envString("LOGLEVEL", "Normal")),
-		MediaDirs: envList("MEDIADIRS", []string{
-			"/mnt/core/pub/cloud/tv",
-			"/mnt/core/pub/cloud/movies",
-		}),
+		// The whole of pub is what the sync job uploads, so it is what the page
+		// measures: anything narrower reports progress against a subset of the
+		// work and reaches 100% while uploads are still running.
+		CloudSource: envString("CLOUDSRC", "/mnt/core/pub"),
+		CloudDest:   envString("CLOUDDST", "pub:"),
+		LogLevel:    ParseLogLevel(envString("LOGLEVEL", "Normal")),
 	}
 
 	outputDir := filepath.Dir(config.StatsFile)
@@ -104,26 +100,6 @@ func envString(key, fallback string) string {
 		return value
 	}
 	return fallback
-}
-
-// envList reads a comma-separated list, dropping blank entries so a trailing
-// comma or a stray space cannot produce an empty path.
-func envList(key string, fallback []string) []string {
-	raw := os.Getenv(key)
-	if raw == "" {
-		return fallback
-	}
-
-	var values []string
-	for _, field := range strings.Split(raw, ",") {
-		if trimmed := strings.TrimSpace(field); trimmed != "" {
-			values = append(values, trimmed)
-		}
-	}
-	if len(values) == 0 {
-		return fallback
-	}
-	return values
 }
 
 func envInt(key string, fallback int) (int, error) {

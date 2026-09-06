@@ -35,8 +35,8 @@ func TestLoadConfigDefaults(t *testing.T) {
 	config, err := LoadConfig()
 	require.NoError(t, err)
 
-	assert.Equal(t, "/mnt/core/pub/cloud", config.CloudSource)
-	assert.Equal(t, "pub:cloud", config.CloudDest)
+	assert.Equal(t, "/mnt/core/pub", config.CloudSource)
+	assert.Equal(t, "pub:", config.CloudDest)
 	assert.Equal(t, 12*time.Hour, config.CloudMaxAge)
 	assert.Equal(t, 600*time.Second, config.CloudTimeout)
 
@@ -49,13 +49,11 @@ func TestLoadConfigDefaults(t *testing.T) {
 func TestLoadConfigOverrides(t *testing.T) {
 	t.Setenv("STATSFILE", "/srv/www/index.html")
 	t.Setenv("CLOUDMAXAGE", "60")
-	t.Setenv("MEDIADIRS", "/a, /b ,,/c")
 
 	config, err := LoadConfig()
 	require.NoError(t, err)
 
 	assert.Equal(t, time.Minute, config.CloudMaxAge)
-	assert.Equal(t, []string{"/a", "/b", "/c"}, config.MediaDirs)
 	// Sidecars follow STATSFILE when it moves.
 	assert.Equal(t, "/srv/www/favicon.ico", config.FaviconFile)
 	assert.Equal(t, "/srv/www/maintenance.txt", config.MaintenanceFile)

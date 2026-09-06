@@ -1,7 +1,6 @@
 package main
 
 import (
-	"strings"
 	"testing"
 	"time"
 
@@ -9,134 +8,114 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func TestParseListing(t *testing.T) {
+func TestParseTreeSize(t *testing.T) {
 	tests := []struct {
 		name     string
 		input    string
-		expected map[string]int64
+		expected TreeSize
 		wantErr  string
 	}{
 		{
-			name:     "empty input",
-			input:    "",
-			expected: map[string]int64{},
+			name:     "a sized tree",
+			input:    `{"count":1234,"bytes":21468607036351}`,
+			expected: TreeSize{Bytes: 21468607036351, Count: 1234},
 		},
 		{
-			name:  "sizes and paths",
-			input: "1024|movies/a.mkv\n2048|tv/show/s01e01.mkv\n",
-			expected: map[string]int64{
-				"movies/a.mkv":       1024,
-				"tv/show/s01e01.mkv": 2048,
-			},
+			name:     "an empty tree",
+			input:    `{"count":0,"bytes":0}`,
+			expected: TreeSize{},
 		},
 		{
-			name:     "path containing the separator splits on the first only",
-			input:    "512|music/AC|DC/song.flac\n",
-			expected: map[string]int64{"music/AC|DC/song.flac": 512},
+			name:     "fields rclone adds are ignored",
+			input:    `{"count":2,"bytes":300,"sizeless":1}`,
+			expected: TreeSize{Bytes: 300, Count: 2},
 		},
 		{
-			name:     "blank lines are skipped",
-			input:    "\n100|a\n\n",
-			expected: map[string]int64{"a": 100},
+			name:    "unparseable output is an error",
+			input:   "Total objects: 2\n",
+			wantErr: "parsing rclone size output",
 		},
 		{
-			name:    "missing separator is an error",
-			input:   "1024 movies/a.mkv\n",
-			wantErr: "no separator",
-		},
-		{
-			name:    "non-numeric size is an error",
-			input:   "big|movies/a.mkv\n",
-			wantErr: "malformed listing line",
+			name:    "a tree rclone could not size is an error",
+			input:   `{"count":2,"bytes":-1}`,
+			wantErr: "unusable size",
 		},
 	}
 
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			files, err := ParseListing(strings.NewReader(test.input))
+			size, err := ParseTreeSize([]byte(test.input))
 			if test.wantErr != "" {
 				require.Error(t, err)
 				assert.Contains(t, err.Error(), test.wantErr)
 				return
 			}
 			require.NoError(t, err)
-			assert.Equal(t, test.expected, files)
+			assert.Equal(t, test.expected, size)
 		})
 	}
 }
 
-func TestBucketFiles(t *testing.T) {
+func TestCloudProgressFigures(t *testing.T) {
 	tests := []struct {
 		name              string
-		local             map[string]int64
-		remote            map[string]int64
+		local             TreeSize
+		remote            TreeSize
 		wantUploadedBytes int64
-		wantUploadedFiles int
 		wantRemainBytes   int64
-		wantRemainFiles   int
-		wantTotalBytes    int64
-		wantPercent       float64
+		wantUploadedPct   float64
+		wantRemainPct     float64
 	}{
 		{
-			name:  "nothing uploaded yet",
-			local: map[string]int64{"a": 100, "b": 300},
-			// A remote holding none of it.
-			remote:          map[string]int64{},
+			name:            "nothing uploaded yet",
+			local:           TreeSize{Bytes: 400, Count: 2},
+			remote:          TreeSize{},
 			wantRemainBytes: 400,
-			wantRemainFiles: 2,
-			wantTotalBytes:  400,
-			wantPercent:     0,
+			wantRemainPct:   100,
+		},
+		{
+			name:              "partly uploaded",
+			local:             TreeSize{Bytes: 400, Count: 2},
+			remote:            TreeSize{Bytes: 100, Count: 1},
+			wantUploadedBytes: 100,
+			wantRemainBytes:   300,
+			wantUploadedPct:   25,
+			wantRemainPct:     75,
 		},
 		{
 			name:              "fully uploaded",
-			local:             map[string]int64{"a": 100, "b": 300},
-			remote:            map[string]int64{"a": 100, "b": 300},
+			local:             TreeSize{Bytes: 400, Count: 2},
+			remote:            TreeSize{Bytes: 400, Count: 2},
 			wantUploadedBytes: 400,
-			wantUploadedFiles: 2,
-			wantTotalBytes:    400,
-			wantPercent:       100,
+			wantUploadedPct:   100,
 		},
 		{
-			name:              "size mismatch still counts as remaining",
-			local:             map[string]int64{"a": 100, "b": 300},
-			remote:            map[string]int64{"a": 100, "b": 299},
-			wantUploadedBytes: 100,
-			wantUploadedFiles: 1,
-			wantRemainBytes:   300,
-			wantRemainFiles:   1,
-			wantTotalBytes:    400,
-			wantPercent:       25,
+			name: "a remote holding more than the local tree stops at complete",
+			// A file deleted locally survives on the remote until the next sync
+			// pass, which must not read as more than 100% uploaded.
+			local:             TreeSize{Bytes: 400, Count: 2},
+			remote:            TreeSize{Bytes: 9999, Count: 30},
+			wantUploadedBytes: 400,
+			wantUploadedPct:   100,
 		},
 		{
-			name:              "remote-only files are ignored entirely",
-			local:             map[string]int64{"a": 100},
-			remote:            map[string]int64{"a": 100, "deleted-locally": 9999},
-			wantUploadedBytes: 100,
-			wantUploadedFiles: 1,
-			wantTotalBytes:    100,
-			wantPercent:       100,
-		},
-		{
-			name:   "empty source does not divide by zero",
-			local:  map[string]int64{},
-			remote: map[string]int64{"a": 1},
+			name:   "an empty source does not divide by zero",
+			local:  TreeSize{},
+			remote: TreeSize{Bytes: 1, Count: 1},
 		},
 	}
 
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			progress := BucketFiles(test.local, test.remote)
+			progress := &CloudProgress{Local: test.local, Remote: test.remote}
 
-			assert.Equal(t, test.wantUploadedBytes, progress.UploadedBytes, "uploaded bytes")
-			assert.Equal(t, test.wantUploadedFiles, progress.UploadedFiles, "uploaded files")
-			assert.Equal(t, test.wantRemainBytes, progress.RemainingBytes, "remaining bytes")
-			assert.Equal(t, test.wantRemainFiles, progress.RemainingFiles, "remaining files")
-			assert.Equal(t, test.wantTotalBytes, progress.TotalBytes, "total bytes")
-			assert.InDelta(t, test.wantPercent, progress.Percent, 0.001, "percent")
+			assert.Equal(t, test.wantUploadedBytes, progress.UploadedBytes(), "uploaded bytes")
+			assert.Equal(t, test.wantRemainBytes, progress.RemainingBytes(), "remaining bytes")
+			assert.InDelta(t, test.wantUploadedPct, progress.UploadedPercent(), 0.001, "uploaded percent")
+			assert.InDelta(t, test.wantRemainPct, progress.RemainingPercent(), 0.001, "remaining percent")
 
-			// Every local byte lands in exactly one bucket.
-			assert.Equal(t, progress.TotalBytes, progress.UploadedBytes+progress.RemainingBytes)
-			assert.Equal(t, progress.TotalFiles, progress.UploadedFiles+progress.RemainingFiles)
+			// Every local byte lands in exactly one of the two figures.
+			assert.Equal(t, test.local.Bytes, progress.UploadedBytes()+progress.RemainingBytes())
 		})
 	}
 }

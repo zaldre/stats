@@ -7,7 +7,7 @@ import (
 )
 
 // VERSION is bumped whenever a change becomes eligible for commit.
-const VERSION = "0.4.0"
+const VERSION = "0.5.0"
 
 func main() {
 	if err := run(); err != nil {
@@ -33,6 +33,8 @@ func run() error {
 		UptimeImageURL: config.UptimeImageURL,
 		MediaSize:      Unavailable,
 		DownloadSize:   Unavailable,
+		Uploaded:       Unavailable,
+		Remaining:      Unavailable,
 	}
 
 	logger.Infof("Querying SabNZBD for queue size and remaining MB")
@@ -44,15 +46,6 @@ func run() error {
 		page.DownloadSize = Unavailable
 	}
 
-	logger.Infof("Getting media directory stats")
-	mediaBytes, err := MeasureMediaDirs(config.MediaDirs, logger)
-	if err != nil {
-		logger.Errorf("Could not measure the media directories: %v", err)
-	} else if page.MediaSize, err = FormatBytes(mediaBytes); err != nil {
-		logger.Errorf("Could not format the media size: %v", err)
-		page.MediaSize = Unavailable
-	}
-
 	page.Maintenance, err = ReadMaintenanceNotice(config.MaintenanceFile)
 	if err != nil {
 		// An unreadable banner should not cost the rest of the page.
@@ -62,9 +55,12 @@ func run() error {
 		logger.Debugf("Maintenance notice: %s", page.Maintenance)
 	}
 
+	// One measurement of each side feeds all three figures: the local tree is
+	// the total, and the remote is what of it has already gone up. Measuring the
+	// total separately is what used to let it disagree with the other two.
 	cloudCtx, cancel := context.WithTimeout(ctx, config.CloudTimeout)
 	defer cancel()
-	page.Uploaded, page.Remaining = DescribeCloudProgress(
+	page.MediaSize, page.Uploaded, page.Remaining = DescribeCloudProgress(
 		CollectCloudProgress(cloudCtx, config, logger), time.Now())
 
 	logger.Debugf("Total: %s", page.MediaSize)

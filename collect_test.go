@@ -70,55 +70,48 @@ func TestDescribeCloudProgress(t *testing.T) {
 	now := time.Date(2026, 9, 5, 12, 0, 0, 0, time.UTC)
 
 	t.Run("nil progress is unavailable", func(t *testing.T) {
-		uploaded, remaining := DescribeCloudProgress(nil, now)
+		total, uploaded, remaining := DescribeCloudProgress(nil, now)
+		assert.Equal(t, Unavailable, total)
 		assert.Equal(t, Unavailable, uploaded)
 		assert.Equal(t, Unavailable, remaining)
 	})
 
-	t.Run("fresh snapshot carries the percentage and no timestamp", func(t *testing.T) {
-		uploaded, remaining := DescribeCloudProgress(&CloudProgress{
-			UploadedBytes:  21468607036351,
-			RemainingBytes: 29704550472391,
-			Percent:        41.95,
-			Generated:      now.Add(-time.Hour),
+	t.Run("fresh snapshot carries both percentages and no timestamp", func(t *testing.T) {
+		total, uploaded, remaining := DescribeCloudProgress(&CloudProgress{
+			Local:     TreeSize{Bytes: 51173157508742, Count: 4000},
+			Remote:    TreeSize{Bytes: 21468607036351, Count: 1700},
+			Generated: now.Add(-time.Hour),
 		}, now)
 
+		assert.Equal(t, "46.54 TB", total)
 		assert.Equal(t, "19.53 TB (42.0%)", uploaded)
-		assert.Equal(t, "27.02 TB", remaining)
+		assert.Equal(t, "27.02 TB (58.0%)", remaining)
 	})
 
-	t.Run("stale snapshot is labelled on both figures", func(t *testing.T) {
-		uploaded, remaining := DescribeCloudProgress(&CloudProgress{
-			UploadedBytes:  1024,
-			RemainingBytes: 2048,
-			Percent:        33.3,
-			Generated:      now.Add(-48 * time.Hour),
+	t.Run("the three figures always agree", func(t *testing.T) {
+		// The whole point of measuring each side once: the two parts add up to
+		// the total the page also shows.
+		_, uploaded, remaining := DescribeCloudProgress(&CloudProgress{
+			Local:     TreeSize{Bytes: 1000},
+			Remote:    TreeSize{Bytes: 250},
+			Generated: now,
 		}, now)
 
+		assert.Equal(t, "250 Bytes (25.0%)", uploaded)
+		assert.Equal(t, "750 Bytes (75.0%)", remaining)
+	})
+
+	t.Run("stale snapshot is labelled on every figure", func(t *testing.T) {
+		total, uploaded, remaining := DescribeCloudProgress(&CloudProgress{
+			Local:     TreeSize{Bytes: 3072},
+			Remote:    TreeSize{Bytes: 1024},
+			Generated: now.Add(-48 * time.Hour),
+		}, now)
+
+		assert.Contains(t, total, "as of")
 		assert.Contains(t, uploaded, "as of")
 		assert.Contains(t, remaining, "as of")
-	})
-}
-
-func TestMeasureMediaDirs(t *testing.T) {
-	logger := NewLogger(LogNone)
-	dir := t.TempDir()
-	require.NoError(t, os.WriteFile(filepath.Join(dir, "a.bin"), make([]byte, 1500), 0o644))
-
-	t.Run("sums file sizes", func(t *testing.T) {
-		total, err := MeasureMediaDirs([]string{dir}, logger)
-		require.NoError(t, err)
-		assert.Equal(t, int64(1500), total)
-	})
-
-	t.Run("a missing directory alongside a good one is skipped", func(t *testing.T) {
-		total, err := MeasureMediaDirs([]string{dir, filepath.Join(dir, "absent")}, logger)
-		require.NoError(t, err)
-		assert.Equal(t, int64(1500), total)
-	})
-
-	t.Run("all directories missing is an error", func(t *testing.T) {
-		_, err := MeasureMediaDirs([]string{filepath.Join(dir, "absent")}, logger)
-		require.Error(t, err)
+		// The percentage and the timestamp share one set of parentheses.
+		assert.Contains(t, uploaded, "(33.3%, as of ")
 	})
 }

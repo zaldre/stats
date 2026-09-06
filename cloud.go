@@ -1,30 +1,32 @@
 package main
 
 import (
-	"bufio"
 	"context"
 	"encoding/json"
 	"fmt"
-	"io"
 	"os"
 	"os/exec"
-	"strconv"
 	"strings"
 	"sync"
 	"time"
 )
 
-// CloudProgress is the result of comparing the local media tree against the
-// rclone remote that rclone/cloud_move.sh syncs it to.
+// TreeSize is what one `rclone size` call reports about a whole tree.
+type TreeSize struct {
+	Bytes int64 `json:"bytes"`
+	Count int   `json:"count"`
+}
+
+// CloudProgress is one measurement of each side of the sync: the local media
+// tree and the rclone remote that rclone/cloud_move.sh sends it to.
+//
+// Only the two measurements are stored. Every figure the page shows - total,
+// uploaded, remaining, and both percentages - is derived from them, so the
+// numbers on the page cannot disagree with each other or with rclone.
 type CloudProgress struct {
-	UploadedBytes  int64     `json:"uploaded_bytes"`
-	UploadedFiles  int       `json:"uploaded_files"`
-	RemainingBytes int64     `json:"remaining_bytes"`
-	RemainingFiles int       `json:"remaining_files"`
-	TotalBytes     int64     `json:"total_bytes"`
-	TotalFiles     int       `json:"total_files"`
-	Percent        float64   `json:"percent"`
-	Generated      time.Time `json:"generated"`
+	Local     TreeSize  `json:"local"`
+	Remote    TreeSize  `json:"remote"`
+	Generated time.Time `json:"generated"`
 }
 
 // StaleAfter is how old a snapshot may be before the page stops presenting it
@@ -37,183 +39,158 @@ func (progress *CloudProgress) Stale(now time.Time) bool {
 	return now.Sub(progress.Generated) > StaleAfter
 }
 
-// CollectCloudProgress returns the upload comparison, preferring a recent
+// UploadedBytes is how much of the local tree the remote already holds, capped
+// at the local total.
+//
+// The remote can briefly hold more than the local tree does: a file deleted
+// locally survives there until the next sync pass removes it. That drift is
+// transient, and an upload reported as more than complete is worse than one
+// that stops at complete.
+func (progress *CloudProgress) UploadedBytes() int64 {
+	if progress.Remote.Bytes > progress.Local.Bytes {
+		return progress.Local.Bytes
+	}
+	return progress.Remote.Bytes
+}
+
+// RemainingBytes is what still has to go up.
+func (progress *CloudProgress) RemainingBytes() int64 {
+	return progress.Local.Bytes - progress.UploadedBytes()
+}
+
+// UploadedPercent and RemainingPercent share the local total as their
+// denominator, so the two always sum to 100.
+func (progress *CloudProgress) UploadedPercent() float64 {
+	return percentOf(progress.UploadedBytes(), progress.Local.Bytes)
+}
+
+func (progress *CloudProgress) RemainingPercent() float64 {
+	return percentOf(progress.RemainingBytes(), progress.Local.Bytes)
+}
+
+func percentOf(part, whole int64) float64 {
+	if whole <= 0 {
+		return 0
+	}
+	return float64(part) * 100 / float64(whole)
+}
+
+// CollectCloudProgress returns the pair of measurements, preferring a recent
 // cached snapshot and falling back to any older one if a refresh fails.
 //
-// It never returns an error. The download and media figures are worth
-// publishing on their own, and a stale upload number beats replacing the whole
-// page with nothing; a nil result means there is no figure to show at all.
+// It never returns an error. The download figure is worth publishing on its
+// own, and a stale measurement beats replacing the whole page with nothing; a
+// nil result means there is no figure to show at all.
 func CollectCloudProgress(ctx context.Context, config *Config, logger *Logger) *CloudProgress {
 	cached, cacheErr := readCloudCache(config.CloudCache)
 	if cacheErr == nil {
 		if age := time.Since(cached.Generated); age < config.CloudMaxAge {
-			logger.Infof("Reusing cloud comparison from %s ago", age.Round(time.Minute))
+			logger.Infof("Reusing cloud measurements from %s ago", age.Round(time.Minute))
 			return cached
 		}
 	}
 
-	logger.Infof("Comparing %s against %s", config.CloudSource, config.CloudDest)
+	logger.Infof("Measuring %s and %s", config.CloudSource, config.CloudDest)
 	started := time.Now()
 
-	fresh, err := CompareTrees(ctx, config.CloudSource, config.CloudDest)
+	fresh, err := MeasureTrees(ctx, config.CloudSource, config.CloudDest)
 	if err != nil {
-		logger.Errorf("Cloud comparison failed: %v", err)
+		logger.Errorf("Cloud measurement failed: %v", err)
 		if cacheErr != nil {
 			logger.Errorf("No cached cloud progress to fall back on: %v", cacheErr)
 			return nil
 		}
-		logger.Infof("Falling back to cloud comparison from %s", cached.Generated.Format(time.RFC3339))
+		logger.Infof("Falling back to cloud measurements from %s", cached.Generated.Format(time.RFC3339))
 		return cached
 	}
 
-	logger.Infof("Cloud comparison took %s", time.Since(started).Round(time.Second))
+	logger.Infof("Cloud measurement took %s", time.Since(started).Round(time.Second))
+	logger.Debugf("Local: %d bytes in %d files", fresh.Local.Bytes, fresh.Local.Count)
+	logger.Debugf("Remote: %d bytes in %d files", fresh.Remote.Bytes, fresh.Remote.Count)
+
 	if err := writeCloudCache(config.CloudCache, fresh); err != nil {
 		logger.Errorf("Could not cache cloud progress: %v", err)
 	}
 	return fresh
 }
 
-// CompareTrees lists both sides and buckets the local files against the remote.
-func CompareTrees(ctx context.Context, source, dest string) (*CloudProgress, error) {
+// MeasureTrees sizes both sides, once each.
+func MeasureTrees(ctx context.Context, source, dest string) (*CloudProgress, error) {
 	var (
-		localFiles, remoteFiles map[string]int64
-		localErr, remoteErr     error
-		waitGroup               sync.WaitGroup
+		local, remote       TreeSize
+		localErr, remoteErr error
+		waitGroup           sync.WaitGroup
 	)
 
-	// The remote listing dominates the runtime, so overlap the local walk with it
-	// rather than paying for both in sequence.
+	// The remote measurement dominates the runtime, so overlap the local walk
+	// with it rather than paying for both in sequence.
 	waitGroup.Add(2)
 	go func() {
 		defer waitGroup.Done()
 		// fastList buys nothing on a local filesystem, where the walk already
 		// takes a couple of seconds.
-		localFiles, localErr = listFiles(ctx, source, false)
+		local, localErr = MeasureTree(ctx, source, false)
 	}()
 	go func() {
 		defer waitGroup.Done()
-		remoteFiles, remoteErr = listFiles(ctx, dest, true)
+		remote, remoteErr = MeasureTree(ctx, dest, true)
 	}()
 	waitGroup.Wait()
 
 	if localErr != nil {
-		return nil, fmt.Errorf("listing source %s: %w", source, localErr)
+		return nil, fmt.Errorf("sizing source %s: %w", source, localErr)
 	}
 	if remoteErr != nil {
-		return nil, fmt.Errorf("listing destination %s: %w", dest, remoteErr)
+		return nil, fmt.Errorf("sizing destination %s: %w", dest, remoteErr)
 	}
 
-	progress := BucketFiles(localFiles, remoteFiles)
-	progress.Generated = time.Now()
-	return progress, nil
+	return &CloudProgress{Local: local, Remote: remote, Generated: time.Now()}, nil
 }
 
-// BucketFiles splits the local files into what the remote already holds and
-// what still has to go.
+// MeasureTree returns what rclone reports for a whole tree in one call.
 //
-// Comparing the two totals alone cannot do this: it gives no way to separate
-// bytes not yet uploaded from bytes that exist only on the remote. Files present
-// remotely but missing locally are deliberately ignored - rclone sync deletes
-// them on its next pass, so they are transient drift, not part of the upload.
-func BucketFiles(localFiles, remoteFiles map[string]int64) *CloudProgress {
-	progress := &CloudProgress{}
-
-	for path, size := range localFiles {
-		progress.TotalBytes += size
-		progress.TotalFiles++
-
-		// Same path and same size, or it still has to go: a size mismatch means a
-		// partial or superseded copy that rclone will send again.
-		if remoteSize, found := remoteFiles[path]; found && remoteSize == size {
-			progress.UploadedBytes += size
-			progress.UploadedFiles++
-			continue
-		}
-		progress.RemainingBytes += size
-		progress.RemainingFiles++
-	}
-
-	if progress.TotalBytes > 0 {
-		progress.Percent = float64(progress.UploadedBytes) * 100 / float64(progress.TotalBytes)
-	}
-	return progress
-}
-
-// listFiles returns path -> size for every file under target.
-//
-// Both sides are listed with rclone rather than walking the local tree in Go:
-// identical tooling gives identical relative paths and identical size semantics,
-// which is what makes the two maps comparable key for key.
+// Both sides are sized with rclone rather than one of them walked in Go:
+// identical tooling gives identical size semantics, which is what makes the two
+// figures comparable at all.
 //
 // fastList collapses a per-directory walk into one recursive listing. Against
 // the crypt-over-Dropbox remote that is the difference between roughly a hundred
 // seconds and well over ten minutes, so it is essential there.
-func listFiles(ctx context.Context, target string, fastList bool) (map[string]int64, error) {
-	args := []string{"lsf", "-R", "--files-only", "--format", "sp", "--separator", "|"}
+func MeasureTree(ctx context.Context, target string, fastList bool) (TreeSize, error) {
+	args := []string{"size", "--json"}
 	if fastList {
 		args = append(args, "--fast-list")
 	}
 	args = append(args, "--", target)
 
 	command := exec.CommandContext(ctx, "rclone", args...)
-	stdout, err := command.StdoutPipe()
-	if err != nil {
-		return nil, fmt.Errorf("opening rclone output pipe: %w", err)
-	}
-
 	var stderr strings.Builder
 	command.Stderr = &stderr
 
-	if err := command.Start(); err != nil {
-		return nil, fmt.Errorf("starting rclone: %w", err)
-	}
-
-	// Drain the pipe before waiting: rclone blocks once the buffer fills, and a
-	// full listing is far larger than the buffer.
-	files, parseErr := ParseListing(stdout)
-
-	if err := command.Wait(); err != nil {
+	output, err := command.Output()
+	if err != nil {
 		message := strings.TrimSpace(stderr.String())
 		if ctx.Err() != nil {
-			return nil, fmt.Errorf("rclone listing of %s did not finish: %w: %s", target, ctx.Err(), message)
+			return TreeSize{}, fmt.Errorf("rclone size of %s did not finish: %w: %s", target, ctx.Err(), message)
 		}
-		return nil, fmt.Errorf("rclone exited with %w: %s", err, message)
+		return TreeSize{}, fmt.Errorf("rclone size of %s exited with %w: %s", target, err, message)
 	}
-	if parseErr != nil {
-		return nil, fmt.Errorf("reading rclone output: %w", parseErr)
-	}
-	return files, nil
+	return ParseTreeSize(output)
 }
 
-// ParseListing reads the "size|path" lines produced by rclone lsf.
-func ParseListing(reader io.Reader) (map[string]int64, error) {
-	files := make(map[string]int64)
-	scanner := bufio.NewScanner(reader)
-
-	for scanner.Scan() {
-		line := scanner.Text()
-		if line == "" {
-			continue
-		}
-
-		// Split on the first separator only: a filename may contain a pipe, a
-		// size never can.
-		separator := strings.Index(line, "|")
-		if separator < 0 {
-			return nil, fmt.Errorf("malformed listing line %q: no separator", line)
-		}
-
-		size, err := strconv.ParseInt(line[:separator], 10, 64)
-		if err != nil {
-			return nil, fmt.Errorf("malformed listing line %q: %w", line, err)
-		}
-		files[line[separator+1:]] = size
+// ParseTreeSize reads the single object `rclone size --json` prints.
+func ParseTreeSize(output []byte) (TreeSize, error) {
+	var size TreeSize
+	if err := json.Unmarshal(output, &size); err != nil {
+		return TreeSize{}, fmt.Errorf("parsing rclone size output %q: %w", strings.TrimSpace(string(output)), err)
 	}
-
-	if err := scanner.Err(); err != nil {
-		return nil, err
+	// rclone reports -1 for a tree it could list but not size. Everything
+	// downstream treats bytes as a count, so refuse it here rather than let it
+	// subtract from the other side.
+	if size.Bytes < 0 || size.Count < 0 {
+		return TreeSize{}, fmt.Errorf("rclone reported an unusable size: %d bytes in %d files", size.Bytes, size.Count)
 	}
-	return files, nil
+	return size, nil
 }
 
 func readCloudCache(path string) (*CloudProgress, error) {
@@ -225,6 +202,12 @@ func readCloudCache(path string) (*CloudProgress, error) {
 	var progress CloudProgress
 	if err := json.Unmarshal(content, &progress); err != nil {
 		return nil, fmt.Errorf("parsing cached cloud progress at %s: %w", path, err)
+	}
+	// A cache written by an older build parses cleanly into an empty local
+	// measurement, which would publish a confident 0 Bytes for up to a whole
+	// max-age. Treat it as no cache at all.
+	if progress.Local.Bytes <= 0 {
+		return nil, fmt.Errorf("cached cloud progress at %s has no local measurement", path)
 	}
 	return &progress, nil
 }

@@ -18,7 +18,7 @@ func samplePage() PageData {
 		DownloadSize:   "1.21 GB",
 		Maintenance:    "",
 		Uploaded:       "19.53 TB (42.0%)",
-		Remaining:      "27.02 TB",
+		Remaining:      "27.02 TB (58.0%)",
 	}
 }
 
@@ -58,7 +58,7 @@ func TestRenderPage(t *testing.T) {
 			"<strong>Total:</strong> 46.54 TB",
 			"<strong>Downloads:</strong> 1.21 GB",
 			"<strong>Uploaded:</strong> 19.53 TB (42.0%)",
-			"<strong>Remaining:</strong> 27.02 TB",
+			"<strong>Remaining:</strong> 27.02 TB (58.0%)",
 			"<strong>Maintenance:</strong>",
 		}
 
