@@ -7,7 +7,7 @@ import (
 )
 
 // VERSION is bumped whenever a change becomes eligible for commit.
-const VERSION = "0.5.0"
+const VERSION = "0.5.1"
 
 func main() {
 	if err := run(); err != nil {
@@ -31,10 +31,7 @@ func run() error {
 	page := PageData{
 		PlexURL:        config.PlexURL,
 		UptimeImageURL: config.UptimeImageURL,
-		MediaSize:      Unavailable,
 		DownloadSize:   Unavailable,
-		Uploaded:       Unavailable,
-		Remaining:      Unavailable,
 	}
 
 	logger.Infof("Querying SabNZBD for queue size and remaining MB")
@@ -55,13 +52,37 @@ func run() error {
 		logger.Debugf("Maintenance notice: %s", page.Maintenance)
 	}
 
-	// One measurement of each side feeds all three figures: the local tree is
-	// the total, and the remote is what of it has already gone up. Measuring the
-	// total separately is what used to let it disagree with the other two.
+	// The page goes out with the cached figures before any refresh. A refresh
+	// can take most of the Job's deadline, and the download figure and the
+	// maintenance notice should neither wait for it nor be lost with it if the
+	// pod is killed mid-walk.
+	cached, current := LoadCloudProgress(config, logger)
+	if err := publishPage(config, logger, page, cached); err != nil {
+		return err
+	}
+
+	// The icon is cosmetic: failing to place it should not fail a run that has
+	// already written a good page.
+	if err := WriteFavicon(config.FaviconFile); err != nil {
+		logger.Errorf("Could not write the favicon: %v", err)
+	}
+
+	if current {
+		return nil
+	}
+
 	cloudCtx, cancel := context.WithTimeout(ctx, config.CloudTimeout)
 	defer cancel()
-	page.MediaSize, page.Uploaded, page.Remaining = DescribeCloudProgress(
-		CollectCloudProgress(cloudCtx, config, logger), time.Now())
+	return publishPage(config, logger, page, RefreshCloudProgress(cloudCtx, config, logger, cached))
+}
+
+// publishPage renders the page with the given cloud figures and writes it out.
+//
+// One measurement of each side feeds all three figures: the local tree is the
+// total, and the remote is what of it has already gone up. Measuring the total
+// separately is what used to let it disagree with the other two.
+func publishPage(config *Config, logger *Logger, page PageData, progress *CloudProgress) error {
+	page.MediaSize, page.Uploaded, page.Remaining = DescribeCloudProgress(progress, time.Now())
 
 	logger.Debugf("Total: %s", page.MediaSize)
 	logger.Debugf("Downloads: %s", page.DownloadSize)
@@ -79,12 +100,5 @@ func run() error {
 		return err
 	}
 	logger.Infof("HTML file created successfully")
-
-	// The icon is cosmetic: failing to place it should not fail a run that has
-	// already written a good page.
-	if err := WriteFavicon(config.FaviconFile); err != nil {
-		logger.Errorf("Could not write the favicon: %v", err)
-	}
-
 	return nil
 }

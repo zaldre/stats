@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -75,33 +76,44 @@ func percentOf(part, whole int64) float64 {
 	return float64(part) * 100 / float64(whole)
 }
 
-// CollectCloudProgress returns the pair of measurements, preferring a recent
-// cached snapshot and falling back to any older one if a refresh fails.
+// LoadCloudProgress returns the cached snapshot and whether it is recent enough
+// to publish without a refresh. A nil snapshot means there is no usable cache,
+// which is normal before the first refresh succeeds.
+func LoadCloudProgress(config *Config, logger *Logger) (*CloudProgress, bool) {
+	cached, err := readCloudCache(config.CloudCache)
+	if err != nil {
+		logger.Infof("No usable cloud measurements cached: %v", err)
+		return nil, false
+	}
+
+	age := time.Since(cached.Generated)
+	if age < config.CloudMaxAge {
+		logger.Infof("Reusing cloud measurements from %s ago", age.Round(time.Minute))
+		return cached, true
+	}
+	logger.Infof("Cloud measurements from %s ago are due a refresh", age.Round(time.Minute))
+	return cached, false
+}
+
+// RefreshCloudProgress measures both trees and caches the result, returning
+// fallback if the measurement fails.
 //
 // It never returns an error. The download figure is worth publishing on its
 // own, and a stale measurement beats replacing the whole page with nothing; a
 // nil result means there is no figure to show at all.
-func CollectCloudProgress(ctx context.Context, config *Config, logger *Logger) *CloudProgress {
-	cached, cacheErr := readCloudCache(config.CloudCache)
-	if cacheErr == nil {
-		if age := time.Since(cached.Generated); age < config.CloudMaxAge {
-			logger.Infof("Reusing cloud measurements from %s ago", age.Round(time.Minute))
-			return cached
-		}
-	}
-
+func RefreshCloudProgress(ctx context.Context, config *Config, logger *Logger, fallback *CloudProgress) *CloudProgress {
 	logger.Infof("Measuring %s and %s", config.CloudSource, config.CloudDest)
 	started := time.Now()
 
-	fresh, err := MeasureTrees(ctx, config.CloudSource, config.CloudDest)
+	fresh, err := MeasureTrees(ctx, config.CloudSource, config.CloudDest, config.CloudTPSLimit)
 	if err != nil {
 		logger.Errorf("Cloud measurement failed: %v", err)
-		if cacheErr != nil {
-			logger.Errorf("No cached cloud progress to fall back on: %v", cacheErr)
+		if fallback == nil {
+			logger.Errorf("No cached cloud progress to fall back on")
 			return nil
 		}
-		logger.Infof("Falling back to cloud measurements from %s", cached.Generated.Format(time.RFC3339))
-		return cached
+		logger.Infof("Falling back to cloud measurements from %s", fallback.Generated.Format(time.RFC3339))
+		return fallback
 	}
 
 	logger.Infof("Cloud measurement took %s", time.Since(started).Round(time.Second))
@@ -114,8 +126,9 @@ func CollectCloudProgress(ctx context.Context, config *Config, logger *Logger) *
 	return fresh
 }
 
-// MeasureTrees sizes both sides, once each.
-func MeasureTrees(ctx context.Context, source, dest string) (*CloudProgress, error) {
+// MeasureTrees sizes both sides, once each. Only the remote walk is rate
+// limited: the local one makes no API calls to meter.
+func MeasureTrees(ctx context.Context, source, dest string, remoteTPSLimit int) (*CloudProgress, error) {
 	var (
 		local, remote       TreeSize
 		localErr, remoteErr error
@@ -127,13 +140,11 @@ func MeasureTrees(ctx context.Context, source, dest string) (*CloudProgress, err
 	waitGroup.Add(2)
 	go func() {
 		defer waitGroup.Done()
-		// fastList buys nothing on a local filesystem, where the walk already
-		// takes a couple of seconds.
-		local, localErr = MeasureTree(ctx, source, false)
+		local, localErr = MeasureTree(ctx, source, 0)
 	}()
 	go func() {
 		defer waitGroup.Done()
-		remote, remoteErr = MeasureTree(ctx, dest, true)
+		remote, remoteErr = MeasureTree(ctx, dest, remoteTPSLimit)
 	}()
 	waitGroup.Wait()
 
@@ -153,17 +164,10 @@ func MeasureTrees(ctx context.Context, source, dest string) (*CloudProgress, err
 // identical tooling gives identical size semantics, which is what makes the two
 // figures comparable at all.
 //
-// fastList collapses a per-directory walk into one recursive listing. Against
-// the crypt-over-Dropbox remote that is the difference between roughly a hundred
-// seconds and well over ten minutes, so it is essential there.
-func MeasureTree(ctx context.Context, target string, fastList bool) (TreeSize, error) {
-	args := []string{"size", "--json"}
-	if fastList {
-		args = append(args, "--fast-list")
-	}
-	args = append(args, "--", target)
-
-	command := exec.CommandContext(ctx, "rclone", args...)
+// A positive tpsLimit caps the API calls the walk makes each second; zero leaves
+// it unlimited.
+func MeasureTree(ctx context.Context, target string, tpsLimit int) (TreeSize, error) {
+	command := exec.CommandContext(ctx, "rclone", sizeArgs(target, tpsLimit)...)
 	var stderr strings.Builder
 	command.Stderr = &stderr
 
@@ -176,6 +180,22 @@ func MeasureTree(ctx context.Context, target string, fastList bool) (TreeSize, e
 		return TreeSize{}, fmt.Errorf("rclone size of %s exited with %w: %s", target, err, message)
 	}
 	return ParseTreeSize(output)
+}
+
+// sizeArgs builds the `rclone size` invocation for one tree.
+//
+// There is deliberately no --fast-list. Neither crypt nor Dropbox implements
+// ListR (checked against rclone 1.75.1), so rclone ignored it and walked the
+// remote one list call per directory, eight directories at a time. That burst,
+// on top of the sync job's own traffic, drew a 300-second Dropbox penalty that
+// stalled the sync as well. The rate limit is what actually keeps the walk
+// inside the account's budget.
+func sizeArgs(target string, tpsLimit int) []string {
+	args := []string{"size", "--json"}
+	if tpsLimit > 0 {
+		args = append(args, "--tpslimit", strconv.Itoa(tpsLimit))
+	}
+	return append(args, "--", target)
 }
 
 // ParseTreeSize reads the single object `rclone size --json` prints.

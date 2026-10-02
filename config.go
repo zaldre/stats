@@ -23,11 +23,12 @@ type Config struct {
 	UptimeImageURL  string
 	PlexURL         string
 
-	CloudSource  string
-	CloudDest    string
-	CloudCache   string
-	CloudTimeout time.Duration
-	CloudMaxAge  time.Duration
+	CloudSource   string
+	CloudDest     string
+	CloudCache    string
+	CloudTimeout  time.Duration
+	CloudMaxAge   time.Duration
+	CloudTPSLimit int
 
 	LogLevel LogLevel
 }
@@ -36,18 +37,22 @@ type Config struct {
 // and SABPORT convention this program already exposed to its CronJob.
 const (
 	defaultWebTimeoutSeconds = 15
-	// Dropbox answers a throttle with "trying again in 300 seconds", so a budget
-	// of 300 could never survive one: the backoff alone consumed it and the run
-	// timed out having done nothing. 600 covers one backoff plus the roughly
-	// 100-second remote measurement that follows, and still fits inside the Job's
-	// activeDeadlineSeconds.
-	defaultCloudTimeoutSeconds = 600
-	// Sizing the remote walks it in full, and Dropbox throttles hard once it has
-	// seen a few of those in quick succession - an unthrottled pass takes about
-	// 100 seconds, a throttled one can exceed ten minutes. Refreshing
-	// twice a day keeps the figure current enough for an upload measured in weeks
-	// while leaving the sync job's own API budget alone.
+	// The remote walk costs one list call per directory, about 6,300 of them as
+	// of October 2026, so at defaultCloudTPSLimit it needs roughly 26 minutes.
+	// Dropbox answers a throttle with "trying again in 300 seconds"; 45 minutes
+	// leaves room for three of those on top of the walk. The previous 600 assumed
+	// a 100-second walk that the tree has long outgrown: every run timed out
+	// mid-walk, so the cache was never written and the page never had a figure.
+	// The CronJob's activeDeadlineSeconds must stay above this.
+	defaultCloudTimeoutSeconds = 45 * 60
+	// Sizing the remote walks it in full, so refreshing twice a day keeps the
+	// figure current enough for an upload measured in weeks while leaving the
+	// sync job's own API budget alone.
 	defaultCloudMaxAgeSeconds = 12 * 60 * 60
+	// The sync job runs at --tpslimit 8 and went a full day unthrottled, except
+	// for the one penalty it took twenty seconds after the unlimited walk drew its
+	// own. Four more keeps the pair at twelve calls a second.
+	defaultCloudTPSLimit = 4
 )
 
 // LoadConfig reads configuration from the environment, applying defaults for
@@ -91,6 +96,9 @@ func LoadConfig() (*Config, error) {
 	if config.CloudMaxAge, err = envSeconds("CLOUDMAXAGE", defaultCloudMaxAgeSeconds); err != nil {
 		return nil, err
 	}
+	if config.CloudTPSLimit, err = envPositiveInt("CLOUDTPSLIMIT", defaultCloudTPSLimit); err != nil {
+		return nil, err
+	}
 
 	return config, nil
 }
@@ -115,17 +123,26 @@ func envInt(key string, fallback int) (int, error) {
 	return value, nil
 }
 
-// envSeconds reads a duration expressed in whole seconds. Zero and negative
-// values are rejected rather than normalised: every caller uses the result as a
-// timeout or a cache lifetime, where a non-positive value silently disables the
-// behaviour the operator was trying to tune.
-func envSeconds(key string, fallbackSeconds int) (time.Duration, error) {
-	seconds, err := envInt(key, fallbackSeconds)
+// envPositiveInt rejects zero and negative values rather than normalising them:
+// every caller uses the result as a timeout, a cache lifetime or a rate limit,
+// where a non-positive value silently disables the behaviour the operator was
+// trying to tune.
+func envPositiveInt(key string, fallback int) (int, error) {
+	value, err := envInt(key, fallback)
 	if err != nil {
 		return 0, err
 	}
-	if seconds <= 0 {
-		return 0, fmt.Errorf("%s must be a positive number of seconds, got %d", key, seconds)
+	if value <= 0 {
+		return 0, fmt.Errorf("%s must be positive, got %d", key, value)
+	}
+	return value, nil
+}
+
+// envSeconds reads a duration expressed in whole seconds.
+func envSeconds(key string, fallbackSeconds int) (time.Duration, error) {
+	seconds, err := envPositiveInt(key, fallbackSeconds)
+	if err != nil {
+		return 0, err
 	}
 	return time.Duration(seconds) * time.Second, nil
 }

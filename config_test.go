@@ -38,7 +38,8 @@ func TestLoadConfigDefaults(t *testing.T) {
 	assert.Equal(t, "/mnt/core/pub", config.CloudSource)
 	assert.Equal(t, "pub:", config.CloudDest)
 	assert.Equal(t, 12*time.Hour, config.CloudMaxAge)
-	assert.Equal(t, 600*time.Second, config.CloudTimeout)
+	assert.Equal(t, 45*time.Minute, config.CloudTimeout)
+	assert.Equal(t, 4, config.CloudTPSLimit)
 
 	// The three sidecar files default beside the page, not beside the binary.
 	assert.Equal(t, "/container/data/stats/maintenance.txt", config.MaintenanceFile)
@@ -68,8 +69,9 @@ func TestLoadConfigRejectsBadValues(t *testing.T) {
 	}{
 		{"non-numeric port", "SABPORT", "eighty", "SABPORT must be a whole number"},
 		{"non-numeric timeout", "CLOUDTIMEOUT", "5m", "CLOUDTIMEOUT must be a whole number"},
-		{"zero timeout", "CLOUDTIMEOUT", "0", "must be a positive number of seconds"},
-		{"negative max age", "CLOUDMAXAGE", "-1", "must be a positive number of seconds"},
+		{"zero timeout", "CLOUDTIMEOUT", "0", "CLOUDTIMEOUT must be positive"},
+		{"negative max age", "CLOUDMAXAGE", "-1", "CLOUDMAXAGE must be positive"},
+		{"zero rate limit", "CLOUDTPSLIMIT", "0", "CLOUDTPSLIMIT must be positive"},
 	}
 
 	for _, test := range tests {

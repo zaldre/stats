@@ -1,6 +1,10 @@
 package main
 
 import (
+	"context"
+	"io"
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -140,4 +144,101 @@ func TestCloudProgressStale(t *testing.T) {
 			assert.Equal(t, test.wantStale, progress.Stale(now))
 		})
 	}
+}
+
+func quietLogger() *Logger {
+	return &Logger{level: LogNone, stdout: io.Discard, stderr: io.Discard, now: time.Now}
+}
+
+func TestSizeArgs(t *testing.T) {
+	tests := []struct {
+		name     string
+		target   string
+		tpsLimit int
+		expected []string
+	}{
+		{
+			name:     "unlimited",
+			target:   "/mnt/core/pub",
+			expected: []string{"size", "--json", "--", "/mnt/core/pub"},
+		},
+		{
+			name:     "rate limited",
+			target:   "pub:",
+			tpsLimit: 4,
+			expected: []string{"size", "--json", "--tpslimit", "4", "--", "pub:"},
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			assert.Equal(t, test.expected, sizeArgs(test.target, test.tpsLimit))
+		})
+	}
+}
+
+func TestLoadCloudProgress(t *testing.T) {
+	now := time.Now()
+
+	tests := []struct {
+		name        string
+		cache       *CloudProgress
+		wantCurrent bool
+	}{
+		{
+			name: "no cache",
+		},
+		{
+			name:        "a recent snapshot is reused",
+			cache:       &CloudProgress{Local: TreeSize{Bytes: 400, Count: 2}, Generated: now.Add(-time.Hour)},
+			wantCurrent: true,
+		},
+		{
+			// It still has to come back: it is what the page shows while the
+			// refresh runs, and what it falls back on if the refresh fails.
+			name:  "an old snapshot is returned but due a refresh",
+			cache: &CloudProgress{Local: TreeSize{Bytes: 400, Count: 2}, Generated: now.Add(-13 * time.Hour)},
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			config := &Config{
+				CloudCache:  filepath.Join(t.TempDir(), "cloud-progress.json"),
+				CloudMaxAge: 12 * time.Hour,
+			}
+			if test.cache != nil {
+				require.NoError(t, writeCloudCache(config.CloudCache, test.cache))
+			}
+
+			cached, current := LoadCloudProgress(config, quietLogger())
+			assert.Equal(t, test.wantCurrent, current)
+			if test.cache == nil {
+				assert.Nil(t, cached)
+				return
+			}
+			require.NotNil(t, cached)
+			assert.Equal(t, test.cache.Local, cached.Local)
+		})
+	}
+}
+
+func TestRefreshCloudProgressFallsBack(t *testing.T) {
+	// A cancelled context fails the measurement before rclone starts, which
+	// exercises the fallback without needing rclone or a remote.
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	config := &Config{
+		CloudSource: t.TempDir(),
+		CloudDest:   "pub:",
+		CloudCache:  filepath.Join(t.TempDir(), "cloud-progress.json"),
+	}
+	snapshot := &CloudProgress{Local: TreeSize{Bytes: 400, Count: 2}, Generated: time.Now().Add(-13 * time.Hour)}
+
+	assert.Same(t, snapshot, RefreshCloudProgress(ctx, config, quietLogger(), snapshot))
+	assert.Nil(t, RefreshCloudProgress(ctx, config, quietLogger(), nil))
+
+	_, err := os.Stat(config.CloudCache)
+	assert.True(t, os.IsNotExist(err), "a failed refresh must not write the cache")
 }
